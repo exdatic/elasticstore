@@ -1,0 +1,5 @@
+elasticsearch[async]>=7,<8
+elasticsearch_dsl
+loguru
+orjson
+pydantic
