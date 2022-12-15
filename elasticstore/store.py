@@ -398,10 +398,10 @@ class Store(Generic[T]):
             params=dict(conflicts='proceed'))
 
     async def mget(
-        self, ids: Union[Iterable[str], AsyncIterable[str]], chunk_size: int = 500
+        self, ids: Union[Iterable[str], AsyncIterable[str]], chunk_size: int = 500, **kwargs
     ) -> AsyncGenerator[Tuple[str, Optional[T]], None]:
         async for chunk in chunked(ids, chunk_size):
-            res = await self._es.mget(index=self._index, body={'ids': chunk}, ignore=(404))
+            res = await self._es.mget(index=self._index, body={'ids': chunk}, ignore=(404), **kwargs)
             if "docs" in res:
                 for res in res["docs"]:
                     if res.get("found", False):
