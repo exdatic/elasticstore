@@ -84,9 +84,9 @@ class Lock():
         return await self._es.update(
             index=self._index,
             id=self._resource,
-            body=kwargs,
             retry_on_conflict=DEFAULT_RETRY,
-            refresh="wait_for")
+            refresh="wait_for",
+            **kwargs)
 
     async def _acquire_lock(self):
         # to run the script whether or not the document exists,

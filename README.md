@@ -5,7 +5,7 @@ A store for storing things in Elasticsearch and some other things too. It's all 
 ## 🐍 Installation
 
 - **Operating system**: macOS / OS X · Linux · Windows
-- **Python version**: Python 3.7+
+- **Python version**: Python 3.8+
 - **Package managers**: [pip]
 
 ```bash

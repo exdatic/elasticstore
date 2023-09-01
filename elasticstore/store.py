@@ -1,18 +1,16 @@
 from datetime import datetime
 import functools
+import logging
 from typing import (
-    Any, AsyncGenerator, AsyncIterable, Dict, Generic, Iterable, List,
+    Any, AsyncGenerator, AsyncIterable, Dict, Generic, Iterable, List, Literal,
     Optional, Tuple, Type, TypeVar, Union, cast
 )
-from typing_extensions import Literal
 
 from elasticsearch import AsyncElasticsearch, NotFoundError, RequestError
 from elasticsearch.helpers import async_scan, async_bulk
 from elasticsearch_dsl import Document
 from elasticsearch_dsl.response import Hit
-from loguru import logger
 import orjson
-from pydantic import BaseModel
 
 from elasticstore.utils import aiter, chunked
 
@@ -56,7 +54,7 @@ REMOVE_FROM_LISTS_SCRIPT = """
     })
 """
 
-T = TypeVar('T', bound=Union[Dict[str, Any], BaseModel])
+T = TypeVar('T', bound=Union[Dict[str, Any], Any])
 
 
 def ensure_index_exists():
@@ -70,7 +68,7 @@ def ensure_index_exists():
     return wrapper
 
 
-def mapping_dict(mappings: Union[Dict[str, Any], Type[Document]]):
+def mappings_to_dict(mappings: Union[Dict[str, Any], Type[Document]]):
     if mappings and isinstance(mappings, Type) and issubclass(mappings, Document):
         return cast(Dict[str, Any], getattr(mappings, '_doc_type').mapping.to_dict())
     return mappings
@@ -92,9 +90,13 @@ class Store(Generic[T]):
         self._mappings = mappings
         self._settings = settings
 
-    def _to_dict(self, item: Union[Dict[str, Any], BaseModel]) -> Dict:
-        if isinstance(item, BaseModel):
-            return orjson.loads(item.json())
+    def _to_dict(self, item: Union[Dict[str, Any], Any]) -> Dict:
+        # Pydantic V1
+        if hasattr(item, "json"):
+            return orjson.loads(getattr(item, "json")())
+        # Pydantic V2
+        if hasattr(item, "model_dump_json"):
+            return orjson.loads(getattr(item, "json")())
         else:
             return item
 
@@ -112,19 +114,24 @@ class Store(Generic[T]):
         """
         Checks whether the index exists.
         """
-        return await self._es.indices.exists(index=self._index)
+        resp = await self._es.indices.exists(index=self._index)
+        return resp.body
 
     async def index_create(self):
         """
         Creates the index if not exists.
         """
         if not await self.index_exists():
-            body = dict()
             if self._mappings:
-                body["mappings"] = mapping_dict(self._mappings)
+                mappings = mappings_to_dict(self._mappings)
+            else:
+                mappings = None
             if self._settings:
-                body["settings"] = self._settings
-            return await self._es.indices.create(index=self._index, body=body)
+                settings = self._settings
+            else:
+                settings = None
+            resp = await self._es.indices.create(index=self._index, mappings=mappings, settings=settings)
+            return resp.body
 
     async def index_update(self):
         """
@@ -135,10 +142,11 @@ class Store(Generic[T]):
         else:
             if self._mappings:
                 try:
-                    body = mapping_dict(self._mappings)
-                    await self._es.indices.put_mapping(index=self._index, body=body)
+                    mappings = mappings_to_dict(self._mappings)
+                    resp = await self._es.indices.put_mapping(index=self._index, **mappings)
+                    return resp.body
                 except RequestError as e:
-                    logger.warning(f"Could not update mappings of index '{self._index}' ({e})")
+                    logging.warning(f"Could not update mappings of index '{self._index}' ({e})")
 
     async def index_rebuild(self):
         """
@@ -146,18 +154,22 @@ class Store(Generic[T]):
         """
         next_index = self._index + '-' + datetime.now().strftime("%Y%m%d%H%M%S%f")
 
-        body = dict()
         if self._mappings:
-            body["mappings"] = mapping_dict(self._mappings)
+            mappings = mappings_to_dict(self._mappings)
+        else:
+            mappings = None
         if self._settings:
-            body["settings"] = self._settings
+            settings = self._settings
+        else:
+            settings = None
 
         # create new index
-        await self._es.indices.create(index=next_index, body=body)
+        await self._es.indices.create(index=next_index, mappings=mappings, settings=settings)
 
         # move data
         await self._es.reindex(
-            body={"source": {"index": self._index}, "dest": {"index": next_index}},
+            dest={"index": next_index},
+            source={"index": self._index},
             # request_timeout=3600
         )
 
@@ -169,50 +181,52 @@ class Store(Generic[T]):
         if aliases and self._index not in aliases:
             alias = self._index
             index = next(iter(aliases.keys()))
-            await self._es.indices.update_aliases(body={
-                "actions": [
-                    {"remove": {"alias": alias, "index": index}},
-                    {"add": {"alias": alias, "index": next_index}},
-                ]
-            })
+            await self._es.indices.update_aliases(actions=[
+                {"remove": {"alias": alias, "index": index}},
+                {"add": {"alias": alias, "index": next_index}},
+            ])
             await self._es.indices.delete(index=index)
         # b) delete old index and set index alias on new index (with downtime)
         else:
             await self._es.indices.delete(index=self._index)
-            await self._es.indices.update_aliases(body={
-                "actions": [
-                    {"add": {"alias": self._index, "index": next_index}},
-                ]
-            })
+            await self._es.indices.update_aliases(actions=[
+                {"add": {"alias": self._index, "index": next_index}},
+            ])
 
     async def index_copy(self, index_name: str):
         """
         Rebuild index (should fix mapping errors).
         """
-        body = dict()
         if self._mappings:
-            body["mappings"] = mapping_dict(self._mappings)
+            mappings = mappings_to_dict(self._mappings)
+        else:
+            mappings = None
         if self._settings:
-            body["settings"] = self._settings
+            settings = self._settings
+        else:
+            settings = None
 
         # create new index
-        await self._es.indices.create(index=index_name, body=body)
+        await self._es.indices.create(index=index_name, mappings=mappings, settings=settings)
 
         # move data
         await self._es.reindex(
-            body={"source": {"index": self._index}, "dest": {"index": index_name}},
+            dest={"index": index_name},
+            source={"index": self._index}
             # request_timeout=3600
         )
 
         # refresh the index to make the changes visible
         await self._es.indices.refresh(index=index_name)
+        return Store(self._es, index_name)
 
     async def index_delete(self):
         """
         Deletes the index.
         """
         try:
-            return await self._es.indices.delete(index=self._index)
+            resp = await self._es.indices.delete(index=self._index)
+            return resp.body
         except NotFoundError:
             return None
 
@@ -221,7 +235,8 @@ class Store(Generic[T]):
         Checks whether the document exists in the index.
         """
         try:
-            return await self._es.exists(index=self._index, id=id)
+            resp = await self._es.exists(index=self._index, id=id)
+            return resp.body
         except NotFoundError:
             return False
 
@@ -241,6 +256,11 @@ class Store(Generic[T]):
         doc = cast(Dict, hit.to_dict())
         return self._from_dict(doc)
 
+    async def put(
+        self, id: str, item: T, refresh: Union[bool, Literal['wait_for']] = False
+    ):
+        return await self.update(id, item, refresh=refresh)
+
     async def delete(
         self, id: str, refresh: Union[bool, Literal['wait_for']] = False
     ):
@@ -248,7 +268,8 @@ class Store(Generic[T]):
         Removes a document from the index.
         """
         try:
-            return await self._es.delete(index=self._index, id=id, refresh=refresh)
+            resp = await self._es.delete(index=self._index, id=id, refresh=refresh)
+            return resp.body
         except NotFoundError:
             raise KeyError(id) from None
 
@@ -260,14 +281,14 @@ class Store(Generic[T]):
         Creates or updates a document in the index.
         """
         doc = self._to_dict(item)
-        return await self._es.index(
-            index=self._index, body=doc, id=id, refresh=refresh)  # type: ignore (FIXME es8)
+        resp = await self._es.index(index=self._index, document=doc, id=id, refresh=refresh)
+        return resp.body
 
     @ensure_index_exists()
     async def upsert(
         self,
         id: str,
-        item: Union[Dict[str, Any], BaseModel],
+        item: Union[Dict[str, Any], Any],
         source: Optional[str] = None,
         create: bool = False,
         retry: int = DEFAULT_RETRY,
@@ -282,17 +303,34 @@ class Store(Generic[T]):
             if source is not None:
                 script = dict(source=source, params=doc)
                 if create:
-                    op = dict(script=script, scripted_upsert=True, upsert={})
+                    resp = await self._es.update(index=self._index,
+                                                 id=id,
+                                                 script=script,
+                                                 scripted_upsert=True,
+                                                 upsert={},
+                                                 retry_on_conflict=retry,
+                                                 refresh=refresh)
                 else:
-                    op = dict(script=script)
+                    resp = await self._es.update(index=self._index,
+                                                 id=id,
+                                                 script=script,
+                                                 retry_on_conflict=retry,
+                                                 refresh=refresh)
             else:
                 if create:
-                    op = dict(doc=doc, doc_as_upsert=True)
+                    resp = await self._es.update(index=self._index,
+                                                 id=id,
+                                                 doc=doc,
+                                                 doc_as_upsert=True,
+                                                 retry_on_conflict=retry,
+                                                 refresh=refresh)
                 else:
-                    op = dict(doc=doc)
-
-            return await self._es.update(
-                index=self._index, id=id, body=op, retry_on_conflict=retry, refresh=refresh)
+                    resp = await self._es.update(index=self._index,
+                                                 id=id,
+                                                 doc=doc,
+                                                 retry_on_conflict=retry,
+                                                 refresh=refresh)
+            return resp.body
 
         except NotFoundError:
             raise KeyError(id) from None
@@ -331,7 +369,7 @@ class Store(Generic[T]):
     @ensure_index_exists()
     async def bulk_upsert(
         self,
-        items: AsyncIterable[Tuple[str, Union[Dict[str, Any], BaseModel]]],
+        items: AsyncIterable[Tuple[str, Union[Dict[str, Any], Any]]],
         source: Optional[str] = None,
         create: bool = False,
         retry: int = DEFAULT_RETRY
@@ -375,55 +413,58 @@ class Store(Generic[T]):
         """
         Deletes documents matching the provided query.
         """
-        return await self._es.delete_by_query(
-            index=self._index,
-            body=query,
-            params=dict(conflicts='proceed'))
+        resp = await self._es.delete_by_query(index=self._index,
+                                              query=query,
+                                              conflicts='proceed')
+        return resp.body
 
     @ensure_index_exists()
     async def update_by_query(
         self,
         query: Dict,
-        item: Union[Dict[str, Any], BaseModel],
-        source: Optional[str]
+        item: Union[Dict[str, Any], Any],
+        source: str = UPDATE_SCRIPT
     ):
         """
         Update documents matching the provided query.
         Interprets items as script params.
         """
         doc = self._to_dict(item)
-        return await self._es.update_by_query(
-            index=self._index,
-            body=dict(script=dict(source=source, params=doc), **query),
-            params=dict(conflicts='proceed'))
+        resp = await self._es.update_by_query(index=self._index,
+                                              script=dict(source=source, params=doc),
+                                              query=query,
+                                              conflicts='proceed')
+        return resp.body
 
     async def mget(
         self, ids: Union[Iterable[str], AsyncIterable[str]], chunk_size: int = 500, **kwargs
     ) -> AsyncGenerator[Tuple[str, Optional[T]], None]:
         async for chunk in chunked(ids, chunk_size):
-            res = await self._es.mget(index=self._index, body={'ids': chunk}, ignore=(404), **kwargs)
-            if "docs" in res:
-                for res in res["docs"]:
-                    if res.get("found", False):
-                        doc = cast(Dict, Hit(res).to_dict())
-                        yield res["_id"], self._from_dict(doc)
+            resp = await self._es.mget(index=self._index, ids=chunk, **kwargs)
+            if "docs" in resp:
+                for resp in resp["docs"]:
+                    if resp.get("found", False):
+                        doc = cast(Dict, Hit(resp).to_dict())
+                        yield resp["_id"], self._from_dict(doc)
                     else:
-                        yield res["_id"], None
+                        yield resp["_id"], None
 
     async def refresh(self):
-        await self._es.indices.refresh(index=self._index)
+        resp = await self._es.indices.refresh(index=self._index)
+        return resp.body
 
     async def flush(self):
-        await self._es.indices.flush(index=self._index)
+        resp = await self._es.indices.flush(index=self._index)
+        return resp.body
 
     def __aiter__(self):
         return self.keys()
 
     async def keys(self):
         try:
-            async for res in async_scan(self._es, index=self._index, _source=False):
-                assert isinstance(res, dict)
-                yield res["_id"]
+            async for resp in async_scan(self._es, index=self._index, _source=False):
+                assert isinstance(resp, dict)
+                yield resp["_id"]
         except NotFoundError:
             pass
 
@@ -445,23 +486,24 @@ class Store(Generic[T]):
         ```
         """
         try:
-            async for res in async_scan(self._es, index=self._index, query=query, **kwargs):
-                assert isinstance(res, dict)
-                doc = cast(Dict, Hit(res).to_dict())
-                yield res["_id"], self._from_dict(doc)
+            async for resp in async_scan(self._es, index=self._index, query=query, **kwargs):
+                assert isinstance(resp, dict)
+                doc = cast(Dict, Hit(resp).to_dict())
+                yield resp["_id"], self._from_dict(doc)
         except NotFoundError:
             pass
 
     async def count(self, query: Optional[Dict] = None) -> int:
         try:
-            res = await self._es.count(index=self._index, body=query)
-            return res['count']
+            resp = await self._es.count(index=self._index, query=query)
+            return resp.body['count']
         except NotFoundError:
             return 0
 
     async def search(self, query: Dict, **kwargs):
         try:
-            return await self._es.search(index=self._index, body=query, **kwargs)
+            resp = await self._es.search(index=self._index, **query, **kwargs)
+            return resp.body
         except NotFoundError:
             return None
 

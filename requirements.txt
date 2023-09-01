@@ -1,5 +1,3 @@
-elasticsearch[async]>=7,<8
-elasticsearch_dsl
-loguru
+elasticsearch[async]>=8
+elasticsearch-dsl==8.9.0a1
 orjson
-pydantic
