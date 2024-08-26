@@ -431,7 +431,8 @@ class Store(Generic[T]):
         query: Dict,
         item: Union[Dict[str, Any], Any],
         source: str = UPDATE_SCRIPT,
-        refresh: Optional[bool] = False
+        refresh: Optional[bool] = False,
+        **kwargs
     ):
         """
         Update documents matching the provided query.
@@ -442,7 +443,8 @@ class Store(Generic[T]):
                                               script=dict(source=source, params=doc),
                                               query=query,
                                               conflicts='proceed',
-                                              refresh=refresh)
+                                              refresh=refresh,
+                                              **kwargs)
         return resp.body
 
     async def mget(
