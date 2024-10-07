@@ -351,7 +351,8 @@ class Store(Generic[T]):
     def bulk_delete(
         self,
         ids: Union[Iterable[str], Iterable[str]],
-        stats_only: bool = False
+        stats_only: bool = False,
+        refresh: Union[bool, Literal['wait_for']] = False
     ):
         """
         Remove documents from the index.
@@ -360,14 +361,15 @@ class Store(Generic[T]):
             for id in ids:
                 yield dict(_index=self._index, _id=id, _op_type='delete')
 
-        return bulk(self._es, iter_actions(), raise_on_error=False, stats_only=stats_only)
+        return bulk(self._es, iter_actions(), raise_on_error=False, stats_only=stats_only, refresh=refresh)
 
     @ensure_index_exists()
     def bulk_update(
         self,
         items: Iterable[Tuple[str, T]],
         retry: int = DEFAULT_RETRY,
-        stats_only: bool = False
+        stats_only: bool = False,
+        refresh: Union[bool, Literal['wait_for']] = False
     ):
         """
         Updates documents in the index.
@@ -378,7 +380,7 @@ class Store(Generic[T]):
                 # use _source=doc and not **doc as it allows fields with reserved names like "version"
                 yield dict(_index=self._index, _id=key, _op_type='index', retry_on_conflict=retry, _source=doc)
 
-        return bulk(self._es, iter_actions(), raise_on_error=False, stats_only=stats_only)
+        return bulk(self._es, iter_actions(), raise_on_error=False, stats_only=stats_only, refresh=refresh)
 
     @ensure_index_exists()
     def bulk_upsert(
@@ -387,7 +389,8 @@ class Store(Generic[T]):
         source: Optional[str] = None,
         create: bool = False,
         retry: int = DEFAULT_RETRY,
-        stats_only: bool = False
+        stats_only: bool = False,
+        refresh: Union[bool, Literal['wait_for']] = False
     ):
         """
         Updates documents in the index with partial content.
@@ -421,16 +424,17 @@ class Store(Generic[T]):
                             _index=self._index, _id=key, _op_type='update', retry_on_conflict=retry,
                             doc=doc)
 
-        return bulk(self._es, iter_actions(), raise_on_error=False, stats_only=stats_only)
+        return bulk(self._es, iter_actions(), raise_on_error=False, stats_only=stats_only, refresh=refresh)
 
     @ensure_index_exists()
-    def delete_by_query(self, query: Dict):
+    def delete_by_query(self, query: Dict, refresh: Optional[bool] = False):
         """
         Deletes documents matching the provided query.
         """
         resp = self._es.delete_by_query(index=self._index,
                                         query=query,
-                                        conflicts='proceed')
+                                        conflicts='proceed',
+                                        refresh=refresh)
         return resp.body
 
     @ensure_index_exists()
@@ -438,7 +442,9 @@ class Store(Generic[T]):
         self,
         query: Dict,
         item: Union[Dict[str, Any], Any],
-        source: str = UPDATE_SCRIPT
+        source: str = UPDATE_SCRIPT,
+        refresh: Optional[bool] = False,
+        **kwargs
     ):
         """
         Update documents matching the provided query.
@@ -448,7 +454,9 @@ class Store(Generic[T]):
         resp = self._es.update_by_query(index=self._index,
                                         script=dict(source=source, params=doc),
                                         query=query,
-                                        conflicts='proceed')
+                                        conflicts='proceed',
+                                        refresh=refresh,
+                                        **kwargs)
         return resp.body
 
     def mget(
