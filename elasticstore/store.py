@@ -148,11 +148,11 @@ class Store(Generic[T]):
                 except RequestError as e:
                     logging.warning(f"Could not update mappings of index '{self._index}' ({e})")
 
-    async def index_rebuild(self):
+    async def index_rebuild(self, date_pattern: str = "%Y%m%d%H%M%S%f"):
         """
         Rebuild index (should fix mapping errors).
         """
-        next_index = self._index + '-' + datetime.now().strftime("%Y%m%d%H%M%S%f")
+        next_index = self._index + '-' + datetime.now().strftime(date_pattern)
 
         if self._mappings:
             mappings = mappings_to_dict(self._mappings)
@@ -240,10 +240,7 @@ class Store(Generic[T]):
         except NotFoundError:
             return False
 
-    async def get(self, id: str, **kwargs) -> T:
-        """
-        Returns doc.
-        """
+    async def raw_get(self, id: str, **kwargs):
         try:
             res = await self._es.get(index=self._index, id=id, **kwargs)
         except NotFoundError:
@@ -254,7 +251,13 @@ class Store(Generic[T]):
 
         hit = Hit(res)
         doc = cast(Dict, hit.to_dict())
-        return self._from_dict(doc)
+        return doc
+
+    async def get(self, id: str, **kwargs) -> T:
+        """
+        Returns doc.
+        """
+        return self._from_dict(await self.raw_get(id, **kwargs))
 
     async def put(
         self, id: str, item: T, refresh: Union[bool, Literal['wait_for']] = False
@@ -447,18 +450,24 @@ class Store(Generic[T]):
                                               **kwargs)
         return resp.body
 
-    async def mget(
+    async def raw_mget(
         self, ids: Union[Iterable[str], AsyncIterable[str]], chunk_size: int = 500, **kwargs
-    ) -> AsyncGenerator[Tuple[str, Optional[T]], None]:
+    ) -> AsyncGenerator[Tuple[str, Optional[Dict]], None]:
         async for chunk in achunked(ids, chunk_size):
             resp = await self._es.mget(index=self._index, ids=chunk, **kwargs)
             if "docs" in resp:
                 for resp in resp["docs"]:
                     if resp.get("found", False):
                         doc = cast(Dict, Hit(resp).to_dict())
-                        yield resp["_id"], self._from_dict(doc)
+                        yield resp["_id"], doc
                     else:
                         yield resp["_id"], None
+
+    async def mget(
+        self, ids: Union[Iterable[str], AsyncIterable[str]], chunk_size: int = 500, **kwargs
+    ) -> AsyncGenerator[Tuple[str, Optional[T]], None]:
+        async for doc_id, doc in self.raw_mget(ids, chunk_size=chunk_size, **kwargs):
+            yield doc_id, self._from_dict(doc) if doc is not None else None
 
     async def refresh(self):
         resp = await self._es.indices.refresh(index=self._index)
@@ -479,9 +488,22 @@ class Store(Generic[T]):
         except NotFoundError:
             pass
 
+    async def raw_values(self):
+        async for _, item in self.raw_items():
+            yield item
+
     async def values(self):
         async for _, item in self.items():
             yield item
+
+    async def raw_items(self, query: Optional[Dict] = None, **kwargs) -> AsyncGenerator[Tuple[str, Dict], None]:
+        try:
+            async for resp in async_scan(self._es, index=self._index, query=query, **kwargs):
+                assert isinstance(resp, dict)
+                doc = cast(Dict, Hit(resp).to_dict())
+                yield resp["_id"], doc
+        except NotFoundError:
+            pass
 
     async def items(self, query: Optional[Dict] = None, **kwargs) -> AsyncGenerator[Tuple[str, T], None]:
         """
@@ -496,13 +518,8 @@ class Store(Generic[T]):
         }
         ```
         """
-        try:
-            async for resp in async_scan(self._es, index=self._index, query=query, **kwargs):
-                assert isinstance(resp, dict)
-                doc = cast(Dict, Hit(resp).to_dict())
-                yield resp["_id"], self._from_dict(doc)
-        except NotFoundError:
-            pass
+        async for doc_id, doc in self.raw_items(query=query, **kwargs):
+            yield doc_id, self._from_dict(doc)
 
     async def count(self, query: Optional[Dict] = None) -> int:
         try:
@@ -518,11 +535,8 @@ class Store(Generic[T]):
         except NotFoundError:
             return None
 
-    async def filter_by(
-        self,
-        fields: Dict[str, Union[Union[str, int, float, bool], List[Union[str, int, float, bool]]]]
-    ) -> List[T]:
-        return [item async for _, item in self.items(query={
+    def _filter_query(self, fields: Dict[str, Union[Union[str, int, float, bool], List[Union[str, int, float, bool]]]]):
+        return {
             "query": {
                 "bool": {
                     "filter": [
@@ -534,4 +548,16 @@ class Store(Generic[T]):
                     ]
                 }
             }
-        })]
+        }
+
+    async def raw_filter_by(
+        self,
+        fields: Dict[str, Union[Union[str, int, float, bool], List[Union[str, int, float, bool]]]]
+    ) -> List[Dict]:
+        return [item async for _, item in self.raw_items(query=self._filter_query(fields))]
+
+    async def filter_by(
+        self,
+        fields: Dict[str, Union[Union[str, int, float, bool], List[Union[str, int, float, bool]]]]
+    ) -> List[T]:
+        return [item async for _, item in self.items(query=self._filter_query(fields))]
