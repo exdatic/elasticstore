@@ -96,7 +96,7 @@ class Store(Generic[T]):
             return orjson.loads(getattr(item, "json")())
         # Pydantic V2
         if hasattr(item, "model_dump_json"):
-            return orjson.loads(getattr(item, "json")())
+            return orjson.loads(getattr(item, "model_dump_json")())
         else:
             return item
 
