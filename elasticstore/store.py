@@ -206,6 +206,18 @@ class Store(Generic[T]):
         else:
             settings = None
 
+        if mappings is None:
+            mapping_resp = (await self._es.indices.get_mapping(index=self._index)).body
+            mappings = list(mapping_resp.values())[0]["mappings"]
+
+        if settings is None:
+            settings_resp = (await self._es.indices.get_settings(index=self._index)).body
+            settings = list(settings_resp.values())[0]["settings"]
+            del settings["index"]["creation_date"]
+            del settings["index"]["provided_name"]
+            del settings["index"]["uuid"]
+            del settings["index"]["version"]
+
         # create new index
         await self._es.indices.create(index=index_name, mappings=mappings, settings=settings)
 
