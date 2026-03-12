@@ -363,6 +363,7 @@ class Store(Generic[T]):
     def bulk_delete(
         self,
         ids: Union[Iterable[str], Iterable[str]],
+        chunk_size: int = 500,
         stats_only: bool = False,
         refresh: Union[bool, Literal['wait_for']] = False
     ):
@@ -373,12 +374,14 @@ class Store(Generic[T]):
             for id in ids:
                 yield dict(_index=self._index, _id=id, _op_type='delete')
 
-        return bulk(self._es, iter_actions(), raise_on_error=False, stats_only=stats_only, refresh=refresh)
+        return bulk(self._es, iter_actions(), chunk_size=chunk_size,
+                    raise_on_error=False, stats_only=stats_only, refresh=refresh)
 
     @ensure_index_exists()
     def bulk_update(
         self,
         items: Iterable[Tuple[str, T]],
+        chunk_size: int = 500,
         retry: int = DEFAULT_RETRY,
         stats_only: bool = False,
         refresh: Union[bool, Literal['wait_for']] = False
@@ -392,7 +395,8 @@ class Store(Generic[T]):
                 # use _source=doc and not **doc as it allows fields with reserved names like "version"
                 yield dict(_index=self._index, _id=key, _op_type='index', retry_on_conflict=retry, _source=doc)
 
-        return bulk(self._es, iter_actions(), raise_on_error=False, stats_only=stats_only, refresh=refresh)
+        return bulk(self._es, iter_actions(), chunk_size=chunk_size,
+                    raise_on_error=False, stats_only=stats_only, refresh=refresh)
 
     @ensure_index_exists()
     def bulk_upsert(
@@ -400,6 +404,7 @@ class Store(Generic[T]):
         items: Iterable[Tuple[str, Union[Dict[str, Any], Any]]],
         source: Optional[str] = None,
         create: bool = False,
+        chunk_size: int = 500,
         retry: int = DEFAULT_RETRY,
         stats_only: bool = False,
         refresh: Union[bool, Literal['wait_for']] = False
@@ -436,7 +441,8 @@ class Store(Generic[T]):
                             _index=self._index, _id=key, _op_type='update', retry_on_conflict=retry,
                             doc=doc)
 
-        return bulk(self._es, iter_actions(), raise_on_error=False, stats_only=stats_only, refresh=refresh)
+        return bulk(self._es, iter_actions(), chunk_size=chunk_size,
+                    raise_on_error=False, stats_only=stats_only, refresh=refresh)
 
     @ensure_index_exists()
     def delete_by_query(self, query: Dict, refresh: Optional[bool] = False):
