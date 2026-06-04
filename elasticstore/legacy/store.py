@@ -374,8 +374,13 @@ class Store(Generic[T]):
             for id in ids:
                 yield dict(_index=self._index, _id=id, _op_type='delete')
 
-        return bulk(self._es, iter_actions(), chunk_size=chunk_size,
-                    raise_on_error=False, stats_only=stats_only, refresh=refresh)
+        return bulk(
+            self._es,
+            iter_actions(),
+            chunk_size=chunk_size,
+            raise_on_error=False,
+            stats_only=stats_only,
+            refresh=refresh)
 
     @ensure_index_exists()
     def bulk_update(
@@ -395,8 +400,13 @@ class Store(Generic[T]):
                 # use _source=doc and not **doc as it allows fields with reserved names like "version"
                 yield dict(_index=self._index, _id=key, _op_type='index', retry_on_conflict=retry, _source=doc)
 
-        return bulk(self._es, iter_actions(), chunk_size=chunk_size,
-                    raise_on_error=False, stats_only=stats_only, refresh=refresh)
+        return bulk(
+            self._es,
+            iter_actions(),
+            chunk_size=chunk_size,
+            raise_on_error=False,
+            stats_only=stats_only,
+            refresh=refresh)
 
     @ensure_index_exists()
     def bulk_upsert(
@@ -441,8 +451,13 @@ class Store(Generic[T]):
                             _index=self._index, _id=key, _op_type='update', retry_on_conflict=retry,
                             doc=doc)
 
-        return bulk(self._es, iter_actions(), chunk_size=chunk_size,
-                    raise_on_error=False, stats_only=stats_only, refresh=refresh)
+        return bulk(
+            self._es,
+            iter_actions(),
+            chunk_size=chunk_size,
+            raise_on_error=False,
+            stats_only=stats_only,
+            refresh=refresh)
 
     @ensure_index_exists()
     def delete_by_query(self, query: Dict, refresh: Optional[bool] = False):
@@ -496,6 +511,22 @@ class Store(Generic[T]):
 
     def flush(self):
         resp = self._es.indices.flush(index=self._index)
+        return resp.body
+
+    def force_merge(
+        self,
+        max_num_segments: Optional[int] = None,
+        only_expunge_deletes: Optional[bool] = None,
+        flush: Optional[bool] = None,
+        wait_for_completion: Optional[bool] = None,
+    ):
+        resp = self._es.indices.forcemerge(
+            index=self._index,
+            max_num_segments=max_num_segments,
+            only_expunge_deletes=only_expunge_deletes,
+            flush=flush,
+            wait_for_completion=wait_for_completion,
+        )
         return resp.body
 
     def __iter__(self):
